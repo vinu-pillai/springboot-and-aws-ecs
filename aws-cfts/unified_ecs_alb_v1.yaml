@@ -1,0 +1,298 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: ECS cluster launchtype Fargate.
+
+### Organizing parameters ##
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Common parameters applied to All AWS resources"
+        Parameters:
+          - EnvironmentName
+          - ProjectName
+          - VpcId
+          - SubnetId
+          - SecurityGroupId
+          - Role
+
+      - Label:
+          default: "ECS Parameters"
+        Parameters:
+          - ContainerCpu
+          - ContainerMemory
+
+          - AppContainerName1
+          - AppContainerImageUrl1
+          - AppContainerPort1
+
+      - Label:
+          default: "Service parameters for ECS, Cloudmap and App Mesh."
+        Parameters:
+          - DesiredCount          
+          - ServiceName3
+
+      - Label:
+          default: "Load Balancer parameters"
+        Parameters:
+          - Path
+          - Priority
+
+Parameters:
+
+#Common params for all######
+  EnvironmentName:
+    Type: String
+    Default: dev
+    AllowedValues:
+    - dev
+    - tst
+    - prd
+    Description: "A name that will be used for namespacing our cluster resources."
+
+  ProjectName:
+    Type: String
+    Default: booksapp
+    Description: "A name of application or projectname."
+
+
+  VpcId:
+    Type: "AWS::EC2::VPC::Id"
+    Description: List of VPCs in AWS
+
+  SubnetId:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: List of Subnets in AWS
+
+  SecurityGroupId:
+    Type: List<AWS::EC2::SecurityGroup::Id>
+    Description: "List of security group from the environment"
+
+  #IAM
+  Role:
+    Type: String
+    Default: "ecsTaskExecutionRole"
+    Description: (Optional) An IAM role to give the service's containers if the code within needs to
+                 access other AWS resources like S3 buckets, DynamoDB tables, etc
+##################
+
+## Task Def params ####
+
+  AppImageUrl1:
+    Type: String
+    Default: 535586895171.dkr.ecr.ap-south-1.amazonaws.com/booksapp:0.1.0
+    Description: The url of a docker image that contains the application process that
+                 will handle the traffic for this service                           
+  
+  AppContainerName1:
+    Type: String
+    Description: Name of the container to pull and run
+    Default: booksapp
+
+  AppContainerPort1:
+    Type: Number
+    Default: 8080
+    Description: What port number the application inside the docker container is binding to
+  
+
+  ###Common for task def###
+  ContainerCpu:
+    Type: Number
+    Default: 256
+    Description: How much CPU to give the container. 1024 is 1 CPU
+  ContainerMemory:
+    Type: Number
+    Default: 512
+    Description: How much memory in megabytes to give the container
+
+#############
+## Service params - 1#########
+
+  ServiceName1:
+    Type: String
+    Default: booksapp
+    Description: A name for the service
+
+  
+  ## common for services ##
+
+  DesiredCount:
+    Type: Number
+    Default: 1
+    Description: How many copies of the service task to run
+
+#############
+
+#### ALB / Listener Rules Params ###
+
+  Path:
+    Type: String
+    Default: "*"
+    Description: A path on the load balancer that this service
+                 should be connected to. Use * to send all load balancer
+                 traffic to this service.
+
+  Priority:
+    Type: Number
+    Default: 1
+    Description: The priority for the routing rule added to the load balancer.
+                 This only applies if your have multiple services which have been
+                 assigned to different paths on the load balancer.
+
+##################
+
+Conditions:
+  HasCustomRole: !Not [ !Equals [!Ref 'Role', ''] ]  
+
+Resources:
+
+####################ECS Cluster - Fargate#############
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub ${EnvironmentName}-${ProjectName}-EcsCluster
+      Tags:
+        - Key: env
+          Value: !Sub ${EnvironmentName}
+        - Key: product
+          Value: ecs      
+
+#########ALB + LISTENER#################
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      IpAddressType: ipv4
+      Type: application
+      Scheme: internet-facing
+      LoadBalancerAttributes:
+      - Key: idle_timeout.timeout_seconds
+        Value: '30'    
+      Name: !Sub ${EnvironmentName}-${ProjectName}-Alb
+      Subnets: !Ref SubnetId
+      SecurityGroups: !Ref SecurityGroupId
+      Tags:
+        - Key: Name
+          Value: !Ref EnvironmentName
+
+  DefaultTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${EnvironmentName}-${ProjectName}-default
+      VpcId: !Ref VpcId
+      Port: 80
+      Protocol: HTTP
+
+  LoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref DefaultTargetGroup
+
+  BooksAppTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 6
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      TargetType: ip
+      Name: !Sub ${EnvironmentName}-${ProjectName}-TG
+      Port: !Ref 'AppContainerPort1'
+      Protocol: HTTP
+      UnhealthyThresholdCount: 2        
+      VpcId: !Ref VpcId          
+
+  # Create a rule on the load balancer for routing traffic to the target group
+  LoadBalancerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    DependsOn: BooksAppTargetGroup        
+    Properties:
+      Actions:
+        - TargetGroupArn: !Ref 'BooksAppTargetGroup'
+          Type: 'forward'
+      Conditions:
+        - Field: path-pattern
+          Values: [!Ref 'Path']
+      ListenerArn: !Ref LoadBalancerListener
+        #Fn::ImportValue: !Sub ${EnvironmentName}:PublicListener
+      Priority: !Ref 'Priority'
+
+###########################################
+
+
+############Task definition################
+
+#TD1
+
+  LogGroup1:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub ${EnvironmentName}-task-${AppContainerName1}
+
+  TaskDefinition1:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${EnvironmentName}-CloudFoundation-${AppContainerName1}
+      Cpu: !Ref 'ContainerCpu'
+      Memory: !Ref 'ContainerMemory'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: ecsTaskExecutionRole
+        #Fn::ImportValue: !Sub ${EnvironmentName}:ECSTaskExecutionRole
+      TaskRoleArn:
+        Fn::If:
+          - 'HasCustomRole'
+          - !Ref 'Role'
+          - !Ref "AWS::NoValue"
+      ContainerDefinitions:
+        - Name: !Ref 'AppContainerName1'
+          Cpu: !Ref 'ContainerCpu'
+          Memory: !Ref 'ContainerMemory'
+          Image: !Ref 'AppImageUrl1'
+          PortMappings:
+            - ContainerPort: !Ref 'AppContainerPort1'
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !Sub ${EnvironmentName}-task-${AppContainerName1}
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: !Ref 'AppContainerName1'
+      Tags:
+        - Key: env
+          Value: dev
+        - Key: product
+          Value: ecs
+
+############Service################
+
+#SRV-1
+  Service1:
+    Type: AWS::ECS::Service
+    DependsOn: LoadBalancerRule
+    Properties:
+      ServiceName: !Ref 'ServiceName1'
+      Cluster: !Ref ECSCluster
+        #Fn::ImportValue: !Sub ${EnvironmentName}:ClusterName
+      LaunchType: FARGATE
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 75
+      DesiredCount: !Ref 'DesiredCount'
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups: !Ref 'SecurityGroupId'
+          Subnets: !Split [',', !Join [',', !Ref SubnetId]]
+      TaskDefinition: !Ref 'TaskDefinition1'
+      LoadBalancers:
+        - ContainerName: !Ref 'AppContainerName1'
+          ContainerPort: !Ref AppContainerPort1
+          TargetGroupArn: !Ref 'BooksAppTargetGroup'
